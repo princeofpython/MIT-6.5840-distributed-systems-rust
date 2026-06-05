@@ -1,5 +1,11 @@
 # Rust build artifacts
 Lab1_MapReduce/mapreduce/target/
+Lab1_MapReduce/mapReduce/target/
 
 # Generated output
 Lab1_MapReduce/mapreduce/output/
+Lab1_MapReduce/mapReduce/output/
+
+# Intermediate MapReduce files
+Lab1_MapReduce/mapreduce/intermediate/
+Lab1_MapReduce/mapReduce/intermediate/

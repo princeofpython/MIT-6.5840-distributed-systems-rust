@@ -1,7 +1,10 @@
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use crate::mr::rpc::{TaskArgs, TaskRequest, TaskType};
+use crate::mr::rpc::{TaskArgs, TaskRequest, TaskType, DoneNotify};
 use crate::mr::coordinator::ADDR;
+
+const OUTPUT_DIR: &str = "output";
+const INTERMEDIATE_DIR: &str = "intermediate";
 
 pub async fn run_worker(worker_id: u32) {
     loop{
@@ -9,8 +12,11 @@ pub async fn run_worker(worker_id: u32) {
             Ok(task) => {
                 match task.task_type{
                     TaskType::Map =>{
-                        println!("Worker {}: got Map task {:?}, file: {:?}", worker_id, task.task_id, task.input_file);
+                        println!("Worker {}: got Map task {:?}, file: {:?}", worker_id, task.task_id.unwrap(), task.input_file);
                         // map logic goes here
+                        let task_id = task.task_id.unwrap();
+                        run_map(task).await;
+                        notify_done(worker_id, TaskType::Map, task_id).await.unwrap();
                     }
                     TaskType::Reduce =>{
                         println!("Worker {}: got Reduce task {:?}", worker_id, task.task_id);
@@ -37,7 +43,7 @@ pub async fn run_worker(worker_id: u32) {
 async fn task_request(worker_id: u32) -> Result<TaskArgs, Box<dyn std::error::Error>> {
     let mut stream = TcpStream::connect(ADDR).await?;
 
-    let request = TaskRequest { worker_id };
+    let request = TaskRequest { worker_id, done: None };
     let request_bytes = serde_json::to_vec(&request)?;
     let request_len = (request_bytes.len() as u32).to_be_bytes();
 
@@ -53,5 +59,66 @@ async fn task_request(worker_id: u32) -> Result<TaskArgs, Box<dyn std::error::Er
 
     let response: TaskArgs = serde_json::from_slice(&response_bytes)?;
     Ok(response)
+}
 
+async fn run_map(task: TaskArgs)-> Result<(), Box<dyn std::error::Error>> {
+    tokio::fs::create_dir_all(INTERMEDIATE_DIR).await.unwrap();
+    // map logic goes here
+    if task.task_type != TaskType::Map {
+        return Err("Invalid task type".into());
+    }
+    let task_id = task.task_id.unwrap();
+    let n_reduce = task.n_reduce.unwrap();
+    let input_file = task.input_file.unwrap();
+
+    println!("running map task {}", task_id);
+    
+    let mut hash_buckets: Vec<Vec<(String, String)>> = vec![Vec::new(); n_reduce as usize];
+    let content = tokio::fs::read_to_string(&input_file).await.unwrap();
+    for word in content.split(|c: char| !c.is_alphanumeric() && c != '\'') {
+        let hash = fnv1a(word)% n_reduce;
+        hash_buckets[hash as usize].push((word.to_string(), "1".to_string()));
+    }
+
+    for (i, bucket) in hash_buckets.iter().enumerate() {
+        let file_path = format!("{}/mr-{}-{}", INTERMEDIATE_DIR, task_id, i);
+        let tmp_path = format!("{}.tmp", file_path);
+        let content = serde_json::to_string(bucket).unwrap();
+        tokio::fs::write(&tmp_path, content).await.unwrap();
+        tokio::fs::rename(&tmp_path, &file_path).await.unwrap();
+        println!("Task {}: wrote {} key-value pairs to {}", task_id, bucket.len(), file_path);
+    }
+    println!("sleeping for 5 seconds");
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+    Ok(())
+}
+
+fn fnv1a(s: &str) -> u32{
+    let mut hash = 2166136261u32;
+    for c in s.bytes() {
+        hash = hash ^ (c as u32);
+        hash = hash.wrapping_mul(16777619);
+    }
+    hash
+}
+
+async fn notify_done(worker_id: u32, task_type: TaskType, task_id: u32)-> Result<(), Box<dyn std::error::Error>>{
+    let mut stream = TcpStream::connect(ADDR).await?;
+
+    let request = TaskRequest{
+        worker_id,
+        done: Some(DoneNotify {
+            task_type,
+            task_id,
+        })
+    };
+
+    let request_bytes = serde_json::to_vec(&request)?;
+    let request_len = (request_bytes.len() as u32).to_be_bytes();
+
+    stream.write_all(&request_len).await?;
+    stream.write_all(&request_bytes).await?;
+
+    Ok(())
 }
