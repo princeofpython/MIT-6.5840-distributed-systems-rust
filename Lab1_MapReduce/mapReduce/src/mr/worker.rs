@@ -15,12 +15,14 @@ pub async fn run_worker(worker_id: u32) {
                         println!("Worker {}: got Map task {:?}, file: {:?}", worker_id, task.task_id.unwrap(), task.input_file);
                         // map logic goes here
                         let task_id = task.task_id.unwrap();
-                        run_map(task).await;
+                        run_map(task).await.unwrap();
                         notify_done(worker_id, TaskType::Map, task_id).await.unwrap();
                     }
                     TaskType::Reduce =>{
                         println!("Worker {}: got Reduce task {:?}", worker_id, task.task_id);
-                        // reduce logic goes here
+                        let task_id = task.task_id.unwrap();
+                        run_reduce(task).await.unwrap();
+                        notify_done(worker_id, TaskType::Reduce, task_id).await.unwrap();
                     }
                     TaskType::Wait =>{
                         println!("Worker {}: no task ready, waiting...", worker_id);
@@ -75,7 +77,7 @@ async fn run_map(task: TaskArgs)-> Result<(), Box<dyn std::error::Error>> {
     
     let mut hash_buckets: Vec<Vec<(String, String)>> = vec![Vec::new(); n_reduce as usize];
     let content = tokio::fs::read_to_string(&input_file).await.unwrap();
-    for word in content.split(|c: char| !c.is_alphanumeric() && c != '\'') {
+    for word in content.split(|c: char| !c.is_alphabetic() && c != '\'') {
         let hash = fnv1a(word)% n_reduce;
         hash_buckets[hash as usize].push((word.to_string(), "1".to_string()));
     }
@@ -119,6 +121,57 @@ async fn notify_done(worker_id: u32, task_type: TaskType, task_id: u32)-> Result
 
     stream.write_all(&request_len).await?;
     stream.write_all(&request_bytes).await?;
+
+    Ok(())
+}
+
+async fn run_reduce(task: TaskArgs)-> Result<(), Box<dyn std::error::Error>> {
+    tokio::fs::create_dir_all(OUTPUT_DIR).await.unwrap();
+
+    // reduce logic goes here
+    if task.task_type != TaskType::Reduce {
+        return Err("Invalid task type".into());
+    }
+    let task_id = task.task_id.unwrap();
+
+    println!("running reduce task {}", task_id);
+    
+   let mut all_pairs: Vec<(String, String)> = Vec::new();
+   let mut dir = tokio::fs::read_dir(INTERMEDIATE_DIR).await?;
+
+   while let Some(entry) = dir.next_entry().await? {
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+
+        if file_name.ends_with(&format!("-{}", task_id)) && file_name.starts_with("mr-") {
+            // read the file
+            let content = tokio::fs::read_to_string(&entry.path()).await?;
+            let pairs: Vec<(String, String)> = serde_json::from_str(&content)?;
+            all_pairs.extend(pairs);
+        }
+   }
+
+   all_pairs.sort_by(|a, b| a.0.cmp(&b.0));
+
+   let mut output:String = String::new();
+
+    let mut i = 0;
+    while i < all_pairs.len(){
+        let (key, _) = &all_pairs[i];
+        let mut count = 0;
+        while i < all_pairs.len() && all_pairs[i].0 == *key {
+            count += 1;
+            i += 1;
+        }
+        output.push_str(&format!("{} {}\n", key, count));
+    }
+    
+    let output_path = format!("{}/mr-out-{}", OUTPUT_DIR, task_id);
+    let tmp_path = format!("{}.tmp", output_path);
+    tokio::fs::write(&tmp_path, &output).await?;
+    tokio::fs::rename(&tmp_path, &output_path).await?;
+    println!("sleeping for 5 seconds");
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 
     Ok(())
 }
