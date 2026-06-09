@@ -4,8 +4,8 @@ Distributed MapReduce implementation in Rust following the [MIT 6.5840 Lab 1 spe
 
 ## Architecture
 
-- **Coordinator** — listens on TCP `127.0.0.1:7777`, assigns map/reduce tasks to workers, tracks task state (`Idle` → `InProgress` → `Done`)
-- **Worker** — connects to coordinator, requests tasks, executes map logic, notifies coordinator on completion
+- **Coordinator** — listens on TCP `127.0.0.1:7777`, assigns map/reduce tasks to workers, tracks task state (`Idle` → `InProgress` → `Done`), runs background timeout checker
+- **Worker** — connects to coordinator, requests tasks, executes map/reduce logic, notifies coordinator on completion
 - **RPC** — length-prefixed JSON over TCP (`[4 bytes: length][N bytes: JSON body]`)
 
 ## Running
@@ -22,7 +22,7 @@ cargo run --bin mrworker -- <worker_id>
 
 Example:
 ```sh
-cargo run --bin mrcoordinator -- ../inputs 3
+cargo run --bin mrcoordinator -- ../inputs 4
 cargo run --bin mrworker -- 1
 cargo run --bin mrworker -- 2
 ```
@@ -35,21 +35,42 @@ cargo run --bin mrworker -- 2
 - Output written to `intermediate/mr-{task_id}-{bucket}` (atomic: write to `.tmp` then rename)
 - Worker notifies coordinator on completion; coordinator marks task `Done`
 
-## Intermediate Files
+## Reduce Phase
+
+- Coordinator waits until all map tasks are `Done`, then assigns reduce tasks
+- Each reduce task ID equals a bucket number (`0..n_reduce`)
+- Worker globs `intermediate/mr-*-{bucket}` to collect all map outputs for that bucket
+- Deserializes all `(word, "1")` pairs, sorts by key, counts consecutive identical keys
+- Output written to `output/mr-out-{bucket}` (atomic: write to `.tmp` then rename)
+- Worker notifies coordinator on completion; coordinator marks task `Done`
+
+## File Layout
 
 ```
 intermediate/
-├── mr-0-0   mr-0-1   mr-0-2    ← map task 0, buckets 0,1,2
-├── mr-1-0   mr-1-1   mr-1-2    ← map task 1, buckets 0,1,2
-└── ...
+├── mr-0-0   mr-0-1   mr-0-2   mr-0-3    ← map task 0, 4 buckets
+├── mr-1-0   mr-1-1   mr-1-2   mr-1-3    ← map task 1, 4 buckets
+└── ...                                   ← one row per input file
+
+output/
+├── mr-out-0    ← reduce task 0 (all bucket-0 pairs across all map tasks)
+├── mr-out-1
+├── mr-out-2
+└── mr-out-3    ← n_reduce output files total
 ```
+
+## Crash Recovery
+
+- Each `MapTask` and `ReduceTask` stores a `started_at: Option<Instant>`
+- A background `task_timeout_checker` task runs every 5 seconds
+- Any task `InProgress` for more than 10 seconds is reset to `Idle` and reassigned to the next available worker
 
 ## Status
 
 - [x] Sequential word count (`mrsequential`)
 - [x] Coordinator task assignment via RPC
-- [x] Worker map phase (hash bucketing, intermediate file write)
-- [x] Done notification (worker → coordinator)
-- [ ] Reduce phase
-- [ ] Coordinator `Done()` / worker exit on completion
-- [ ] Crash recovery (task timeout + reassignment)
+- [x] Worker map phase (FNV-1a hash bucketing, intermediate file write)
+- [x] Worker reduce phase (glob intermediate files, sort+count, output write)
+- [x] Done notification (worker → coordinator) for both map and reduce
+- [x] Crash recovery (task timeout + reassignment via background checker)
+- [ ] Coordinator `Exit` signal to workers when all tasks done

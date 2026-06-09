@@ -6,7 +6,7 @@ Personal implementation of MIT 6.5840 (formerly 6.824) Distributed Systems labs 
 
 | Lab | Description | Status |
 |-----|-------------|--------|
-| Lab 1 | MapReduce | In Progress |
+| Lab 1 | MapReduce | Nearly Complete |
 
 ## Structure
 
